@@ -1,6 +1,0 @@
-# 忽略第一版的大数据文件
-starmap/code/data/hip_main.dat
-starmap/sourece/lnxm3000p3000.406
-
-# 忽略整个数据文件夹
-starmap/code/data/
