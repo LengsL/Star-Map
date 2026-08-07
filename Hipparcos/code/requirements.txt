@@ -1,0 +1,5 @@
+pygame>=2.5
+numpy>=1.26
+certifi>=2025.0
+# 可选：CALCEPH 也可读取 JPL 二进制历表；原生读取器不依赖它。
+calcephpy>=4.0; platform_system != "Windows"
