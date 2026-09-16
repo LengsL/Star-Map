@@ -1,3 +1,20 @@
+# Visual Studio
+.vs/
+**/.vs/
+
+# Build output
+Debug/
+Release/
+x64/
+x86/
+
+# C/C++ generated files
+*.pch
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.tlog
 # Large astronomy data files
 /Hipparcos/sourece/lnxm3000p3000.406
 /Hipparcos/code/data/hip_main.dat
