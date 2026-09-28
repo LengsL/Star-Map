@@ -10,6 +10,7 @@
 
 ```text
 data/fk6_stars.bin
+config/observatory.json
 renderer/projection.py
 main.py
 ```
@@ -41,7 +42,7 @@ pip install numpy pygame astropy
 
 ## 启动
 
-在 `FK6\star_map` 目录中运行：
+在 `FK6\python` 目录中运行：
 
 ```powershell
 python main.py
@@ -53,13 +54,15 @@ python main.py
 E:\Anaconda\envs\tianguangso\python.exe main.py
 ```
 
-默认观测地点为东经 `121.55°`、北纬 `29.87°`，并使用当前 UTC 时间。
+默认观测地点从 [`config/observatory.json`](config/observatory.json) 读取，包含东经为正的
+`longitude_deg`、北纬为正的 `latitude_deg` 与 WGS84 椭球高 `height_m`。MFC 启动时会将
+界面中的地点值显式传给 Python，因此不再依赖代码内置地点。
 
 ### 常用参数
 
 ```powershell
-# 指定观测地点
-python main.py --longitude 121.55 --latitude 29.87
+# 指定观测地点（覆盖配置文件）
+python main.py --longitude 121.55 --latitude 29.87 --height 15
 
 # 指定星等上限
 python main.py --magnitude-limit 7.0
@@ -69,6 +72,9 @@ python main.py --time "2026-08-07T20:00:00+08:00"
 
 # 输出一张 PNG 而不打开窗口
 python main.py --time "2026-08-07T20:00:00+08:00" --export rendered\sky.png
+
+# 将每次 GOTO/Track 的目标坐标原子写入给宿主程序读取
+python main.py --goto-output $env:TEMP\starmap_goto.json
 ```
 
 使用 `python main.py --help` 可查看全部参数。
@@ -78,9 +84,10 @@ python main.py --time "2026-08-07T20:00:00+08:00" --export rendered\sky.png
 | 操作 | 功能 |
 | --- | --- |
 | 鼠标滚轮 | 缩放视野 |
-| 鼠标悬停恒星 | 显示该恒星的 FK6 index、Vmag、RA、Dec、Alt、Az |
-| 鼠标左键点击恒星 | 打开 Selected Target 详情面板 |
-| Selected Target → `GOTO` | 将望远镜指向该恒星当前 Alt/Az，并显示绿色准星 |
+| 鼠标悬停星体 | 显示星体信息；恒星包含 FK6 字段，月球包含月相和亮面比例 |
+| 鼠标左键点击 Star / Moon / Sun / Planet | 打开统一的 Selected Object 详情面板 |
+| Selected Object → `GOTO` | 生成该对象当前 Alt/Az 目标；黄色准星是目标，绿色准星是实际望远镜位置 |
+| Selected Moon / Planet → `TRACK` | 每秒更新其 GOTO 目标并向宿主回传；再次点击 `STOP TRACK` 停止 |
 | 拖动窗口边缘 / 角落 | 调整 Pygame 绘图窗口大小并自动重排星图 |
 | `W/A/S/D` 或方向键 | 平移完整星图视图；地平网格、方位标签与天球图层同步移动 |
 | `[` / `]` | 减少 / 增加 Vmag 上限 |
@@ -100,8 +107,13 @@ python main.py --time "2026-08-07T20:00:00+08:00" --export rendered\sky.png
 - 恒星显示：Vmag 仅决定星点亮度和大小；星等上限只决定是否显示。
   鼠标悬停恒星时，信息框基于当前屏幕坐标命中检测；`FK6 index`
   是合并二进制文件中的记录序号。
-- 望远镜指向：唯一入口是 `run_star_map(altitude, azimuth)`；MFC Display 按钮
-  直接调用 `main.py --altitude ... --azimuth ...`，程序内更新绿色准星。
+- 选择模型：`SelectedObject` 是 Star、Moon、Sun 和 Planet 的共用选择模型；新天体
+  只需创建该对象，而不需再加一套点击与 GOTO 状态。
+- 望远镜位置：`actual_telescope_position` 与 `goto_target` 是独立状态。MFC 的
+  Actual Altitude/Azimuth 只定义绿色实际位置；GOTO 不会伪装成设备已经移动。
+- MFC 回传：MFC 为每次启动传入独立的 `--goto-output` 临时 JSON 文件。Python 用
+  临时文件替换的方式原子发布 `sequence`、对象和 Alt/Az；MFC 每 250 ms 读取新序列并显示
+  在独立的 **GOTO target returned from Python** 区域，适合日后替换为真实设备命令。
 - 图层开关：恒星必须显示；星座、赤道坐标网格/黄道、Alt/Az 网格和 Hour Angle
   时角线是可开关的辅助层。
 - 坐标辅助线：Alt/Az 网格包含 15°、30°、45°、60°、75° 高度圈；
@@ -123,4 +135,5 @@ python -m unittest discover -s tests -p "test_fk6_*.py" -v
 ```
 
 测试覆盖 FK6 二进制读取、批量自行传播、Alt/Az 转换、坐标缓存、平移边界、
-辅助图层开关、文字防重叠与恒星外观映射。
+辅助图层开关、文字防重叠、统一对象模型，以及 Moon 的点击 → GOTO → JSON 坐标回传和
+Track Object 更新流程。

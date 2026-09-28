@@ -24,6 +24,8 @@ protected:
 	DECLARE_MESSAGE_MAP()
 private:
 	HICON m_hIcon;
+    CString m_gotoResultPath;
+    ULONGLONG m_lastGotoSequence = 0;
 
     bool ReadCoordinate(
         int controlId,
@@ -35,9 +37,16 @@ private:
 
     bool LaunchPythonStarMap(
         double altitude,
-        double azimuth) const;
+        double azimuth,
+        double longitude,
+        double latitude,
+        double height);
+
+    void ReadGotoResult();
 
 public:
     afx_msg void OnBnClickedButtonDisplay();
+	afx_msg void OnTimer(UINT_PTR nIDEvent);
+	afx_msg void OnDestroy();
 	
 };

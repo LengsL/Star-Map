@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from catalog.star import FK6Star, HEADER, MAGIC, RECORD
+from catalog.metadata import StarInfo, load_metadata
 
 
 ARRAY_DTYPE = np.dtype([
@@ -60,3 +61,8 @@ def load_arrays(source: Path) -> np.ndarray:
     if len(stars) != count:
         raise ValueError(f"{source}: truncated FK6 records")
     return stars
+
+
+def load_catalog(source: Path, metadata_source: Path | None = None) -> tuple[np.ndarray, list[StarInfo]]:
+    stars = load_arrays(source)
+    return stars, load_metadata(metadata_source or source.with_name("fk6_metadata.json"), len(stars))

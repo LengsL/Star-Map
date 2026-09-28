@@ -35,3 +35,13 @@ def propagate_j2000(ra_rad: np.ndarray, dec_rad: np.ndarray,
     propagated_ra = np.arctan2(propagated[:, 1], propagated[:, 0]) % (2.0 * np.pi)
     propagated_dec = np.arctan2(propagated[:, 2], np.hypot(propagated[:, 0], propagated[:, 1]))
     return propagated_ra, propagated_dec
+
+
+def precess_j2000(ra_rad, dec_rad, jd):
+    t=(float(jd)-2451545.0)/36525.0
+    zeta=np.radians((2306.2181*t+0.30188*t*t+0.017998*t**3)/3600.0); z=np.radians((2306.2181*t+1.09468*t*t+0.018203*t**3)/3600.0); theta=np.radians((2004.3109*t-0.42665*t*t-0.041833*t**3)/3600.0)
+    sd,cd=np.sin(dec_rad),np.cos(dec_rad); x,y,q=cd*np.cos(ra_rad),cd*np.sin(ra_rad),sd
+    a,b,c=np.cos(theta)*x-np.sin(theta)*q,y,np.sin(theta)*x+np.cos(theta)*q
+    u,v=np.cos(zeta)*a-np.sin(zeta)*b,np.sin(zeta)*a+np.cos(zeta)*b
+    x2,y2=np.cos(z)*u-np.sin(z)*v,np.sin(z)*u+np.cos(z)*v
+    return np.arctan2(y2,x2)%(2*np.pi),np.arctan2(c,np.hypot(x2,y2))

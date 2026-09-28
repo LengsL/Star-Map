@@ -17,6 +17,7 @@ if str(CODE_ROOT) not in sys.path:
 from astronomy.astronomy import julian_date, radec_to_altaz_batch  # noqa: E402
 from astronomy.star_motion import propagate_j2000  # noqa: E402
 from catalog.fk6_reader import load_arrays  # noqa: E402
+from renderer.projection import load_observatory_config  # noqa: E402
 
 
 def parse_time(value: str | None) -> datetime:
@@ -29,10 +30,19 @@ def parse_time(value: str | None) -> datetime:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Batch FK6 J2000 proper motion and Alt/Az conversion")
     parser.add_argument("--time", help="ISO 8601 observation time; default: current UTC")
-    parser.add_argument("--longitude", type=float, default=121.55, help="east positive, degrees")
-    parser.add_argument("--latitude", type=float, default=29.87, help="north positive, degrees")
+    parser.add_argument("--longitude", type=float, default=None,
+                        help="east positive, degrees; overrides observatory config")
+    parser.add_argument("--latitude", type=float, default=None,
+                        help="north positive, degrees; overrides observatory config")
+    parser.add_argument("--observatory", type=Path, default=None,
+                        help="path to observatory JSON")
     args = parser.parse_args()
-    if not -90.0 <= args.latitude <= 90.0:
+    observatory = load_observatory_config(args.observatory)
+    longitude = observatory.longitude_deg if args.longitude is None else args.longitude
+    latitude = observatory.latitude_deg if args.latitude is None else args.latitude
+    if not -180.0 <= longitude <= 180.0:
+        raise SystemExit("longitude must be between -180 and 180 degrees")
+    if not -90.0 <= latitude <= 90.0:
         raise SystemExit("latitude must be between -90 and 90 degrees")
 
     observation_time = parse_time(args.time)
@@ -43,7 +53,7 @@ def main() -> None:
                               stars["pmra_star_mas_per_year"], stars["pmdec_mas_per_year"],
                               elapsed_years)
     altitude, azimuth = radec_to_altaz_batch(ra, dec, jd_utc,
-                                               math.radians(args.latitude), math.radians(args.longitude))
+                                               math.radians(latitude), math.radians(longitude))
     above_horizon = altitude >= 0.0
     print(f"Processed {len(stars)} FK6 stars at once")
     print(f"Epoch: {observation_time:%Y-%m-%d %H:%M:%S UTC}; Δt = {elapsed_years:.6f} Julian years")
