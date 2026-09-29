@@ -24,8 +24,11 @@ protected:
 	DECLARE_MESSAGE_MAP()
 private:
 	HICON m_hIcon;
+    HANDLE m_pythonProcess = nullptr;
     CString m_gotoResultPath;
+    CString m_telescopeStatePath;
     ULONGLONG m_lastGotoSequence = 0;
+    ULONGLONG m_telescopeStateSequence = 0;
 
     bool ReadCoordinate(
         int controlId,
@@ -42,10 +45,25 @@ private:
         double latitude,
         double height);
 
+    bool IsPythonRunning();
+    void SetDisplayProcessControls(bool isRunning);
+    bool WriteTelescopeState(
+        double altitude,
+        double azimuth,
+        double longitude,
+        double latitude,
+        double height);
+    bool ReadCurrentTelescopeInputs(
+        double& altitude,
+        double& azimuth,
+        double& longitude,
+        double& latitude,
+        double& height) const;
     void ReadGotoResult();
 
 public:
-    afx_msg void OnBnClickedButtonDisplay();
+    afx_msg void OnBnClickedButtonStartDisplay();
+    afx_msg void OnBnClickedButtonUpdatePosition();
 	afx_msg void OnTimer(UINT_PTR nIDEvent);
 	afx_msg void OnDestroy();
 	

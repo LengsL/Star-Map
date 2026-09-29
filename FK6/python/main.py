@@ -20,6 +20,8 @@ def main():
                         help="path to observatory JSON (longitude_deg, latitude_deg, height_m)")
     parser.add_argument("--goto-output", type=Path, default=None,
                         help="write selected-object GOTO commands to this JSON file")
+    parser.add_argument("--telescope-state", type=Path, default=None,
+                        help="read updated telescope/site state JSON while the map remains open")
     parser.add_argument("--magnitude-limit", type=float, default=None)
     parser.add_argument("--time", type=parse_time, default=None)
     parser.add_argument("--export", type=Path, default=None)
@@ -38,7 +40,8 @@ def main():
                  magnitude_limit=args.magnitude_limit,
                  fixed_time=args.time,
                  export=args.export,
-                 goto_output=args.goto_output)
+                 goto_output=args.goto_output,
+                 telescope_state_file=args.telescope_state)
 
 
 

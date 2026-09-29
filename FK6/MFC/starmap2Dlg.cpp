@@ -14,11 +14,13 @@
 #include <cstdlib>
 #include <Shellapi.h>
 #include <tchar.h>
+#include <vector>
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
 #endif
-
+#define M_PI 3.14159265358979323846
+#define M_PI_2 (M_PI / 2)
 namespace
 {
     constexpr UINT_PTR GOTO_POLL_TIMER_ID = 1;
@@ -79,6 +81,14 @@ namespace
         CString path(temporaryDirectory);
         path.AppendFormat(_T("starmap2_goto_%lu_%llu.json"), GetCurrentProcessId(), GetTickCount64());
         return path;
+    }
+
+    CString GetTelescopeStatePath()
+    {
+        TCHAR temporaryDirectory[MAX_PATH] = { 0 };
+        if (GetTempPath(MAX_PATH, temporaryDirectory) == 0)
+            return CString();
+        return CString(temporaryDirectory) + _T("starmap2_telescope_state.json");
     }
 
     bool ParseDoubleStrict(
@@ -162,8 +172,11 @@ void Cstarmap2Dlg::DoDataExchange(CDataExchange* pDX)
 
 BEGIN_MESSAGE_MAP(Cstarmap2Dlg, CDialogEx)
     ON_BN_CLICKED(
-        IDC_BUTTON_DISPLAY,
-        &Cstarmap2Dlg::OnBnClickedButtonDisplay)
+        IDC_BUTTON_START_DISPLAY,
+        &Cstarmap2Dlg::OnBnClickedButtonStartDisplay)
+    ON_BN_CLICKED(
+        IDC_BUTTON_UPDATE_POSITION,
+        &Cstarmap2Dlg::OnBnClickedButtonUpdatePosition)
     ON_WM_TIMER()
     ON_WM_DESTROY()
 END_MESSAGE_MAP()
@@ -181,9 +194,13 @@ BOOL Cstarmap2Dlg::OnInitDialog()
     SetDlgItemText(IDC_EDIT_LONGITUDE, _T("121.55"));
     SetDlgItemText(IDC_EDIT_LATITUDE, _T("29.87"));
     SetDlgItemText(IDC_EDIT_HEIGHT, _T("0.0"));
-    SetDlgItemText(IDC_STATIC_GOTO_ALT, _T("Altitude: --"));
-    SetDlgItemText(IDC_STATIC_GOTO_AZ, _T("Azimuth: --"));
+
+    SetDlgItemText(IDC_STATIC_GOTO_ALT, _T("J2000 RA:--"));
+    SetDlgItemText(IDC_STATIC_GOTO_AZ, _T("       Dec:--"));
+
     SetDlgItemText(IDC_STATIC_GOTO_STATUS, _T("No GOTO command received."));
+    m_telescopeStatePath = GetTelescopeStatePath();
+    SetDisplayProcessControls(false);
     SetTimer(GOTO_POLL_TIMER_ID, 250, nullptr);
 
     return TRUE;
@@ -274,7 +291,7 @@ bool Cstarmap2Dlg::LaunchPythonStarMap(
     }
 
 
-    CString parameters;
+    CString commandLine;
 
     m_gotoResultPath = CreateGotoResultPath();
     if (m_gotoResultPath.IsEmpty())
@@ -284,36 +301,47 @@ bool Cstarmap2Dlg::LaunchPythonStarMap(
     }
     DeleteFile(m_gotoResultPath);
     m_lastGotoSequence = 0;
-    SetDlgItemText(IDC_STATIC_GOTO_ALT, _T("Altitude: --"));
-    SetDlgItemText(IDC_STATIC_GOTO_AZ, _T("Azimuth: --"));
+
+    SetDlgItemText(IDC_STATIC_GOTO_ALT, _T("J2000 RA:--"));
+    SetDlgItemText(IDC_STATIC_GOTO_AZ, _T("       Dec:--"));
+
     SetDlgItemText(IDC_STATIC_GOTO_STATUS, _T("Waiting for a GOTO command."));
 
-    parameters.Format(
-        _T("\"%s\" --altitude %.8f --azimuth %.8f --longitude %.8f --latitude %.8f --height %.3f --goto-output \"%s\""),
+    commandLine.Format(
+        _T("\"%s\" \"%s\" --altitude %.8f --azimuth %.8f --longitude %.8f --latitude %.8f --height %.3f --goto-output \"%s\" --telescope-state \"%s\""),
+        pythonExe.GetString(),
         mainPy.GetString(),
         altitude,
         azimuth,
         longitude,
         latitude,
         height,
-        m_gotoResultPath.GetString()
+        m_gotoResultPath.GetString(),
+        m_telescopeStatePath.GetString()
     );
 
-    HINSTANCE result =
-        ShellExecute(
-            nullptr,
-            _T("open"),
-            pythonExe,
-            parameters,
-            starMapRoot,
-            SW_SHOWNORMAL);
-
-    if ((INT_PTR)result <= 32)
+    std::vector<wchar_t> mutableCommandLine(
+        commandLine.GetString(), commandLine.GetString() + commandLine.GetLength());
+    mutableCommandLine.push_back(L'\0');
+    STARTUPINFOW startupInfo = { sizeof(startupInfo) };
+    PROCESS_INFORMATION processInfo = { 0 };
+    if (!CreateProcessW(
+        pythonExe.GetString(),
+        mutableCommandLine.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        CREATE_NO_WINDOW,
+        nullptr,
+        starMapRoot.GetString(),
+        &startupInfo,
+        &processInfo))
     {
         CString message;
 
         message.Format(
-            _T("Unable to launch Python star map:\n%s"),
+            _T("Unable to launch Python star map (error %lu):\n%s"),
+            GetLastError(),
             pythonExe.GetString());
 
         AfxMessageBox(message);
@@ -321,18 +349,46 @@ bool Cstarmap2Dlg::LaunchPythonStarMap(
         return false;
     }
 
+    CloseHandle(processInfo.hThread);
+    m_pythonProcess = processInfo.hProcess;
+    SetDisplayProcessControls(true);
+
     return true;
 }
 
 
-void Cstarmap2Dlg::OnBnClickedButtonDisplay()
+bool Cstarmap2Dlg::IsPythonRunning()
 {
-    double altitude = 0.0;
-    double azimuth = 0.0;
-    double longitude = 0.0;
-    double latitude = 0.0;
-    double height = 0.0;
+    if (m_pythonProcess == nullptr)
+        return false;
 
+    DWORD exitCode = 0;
+    if (GetExitCodeProcess(m_pythonProcess, &exitCode) && exitCode == STILL_ACTIVE)
+        return true;
+
+    CloseHandle(m_pythonProcess);
+    m_pythonProcess = nullptr;
+    SetDisplayProcessControls(false);
+    return false;
+}
+
+
+void Cstarmap2Dlg::SetDisplayProcessControls(bool isRunning)
+{
+    if (CWnd* startButton = GetDlgItem(IDC_BUTTON_START_DISPLAY))
+        startButton->EnableWindow(!isRunning);
+    if (CWnd* updateButton = GetDlgItem(IDC_BUTTON_UPDATE_POSITION))
+        updateButton->EnableWindow(isRunning);
+}
+
+
+bool Cstarmap2Dlg::ReadCurrentTelescopeInputs(
+    double& altitude,
+    double& azimuth,
+    double& longitude,
+    double& latitude,
+    double& height) const
+{
     if (!ReadCoordinate(
         IDC_EDIT_ALT,
         _T("Altitude"),
@@ -341,7 +397,7 @@ void Cstarmap2Dlg::OnBnClickedButtonDisplay()
         true,
         altitude))
     {
-        return;
+        return false;
     }
 
     if (!ReadCoordinate(
@@ -352,7 +408,7 @@ void Cstarmap2Dlg::OnBnClickedButtonDisplay()
         false,
         azimuth))
     {
-        return;
+        return false;
     }
 
     if (!ReadCoordinate(
@@ -377,8 +433,84 @@ void Cstarmap2Dlg::OnBnClickedButtonDisplay()
             true,
             height))
     {
+        return false;
+    }
+
+    return true;
+}
+
+
+bool Cstarmap2Dlg::WriteTelescopeState(
+    double altitude,
+    double azimuth,
+    double longitude,
+    double latitude,
+    double height)
+{
+    if (m_telescopeStatePath.IsEmpty())
+        return false;
+
+    const ULONGLONG sequence = ++m_telescopeStateSequence;
+    CString document;
+    document.Format(
+        _T("{\n  \"sequence\": %llu,\n  \"altitude_deg\": %.8f,\n  \"azimuth_deg\": %.8f,\n  \"longitude_deg\": %.8f,\n  \"latitude_deg\": %.8f,\n  \"height_m\": %.3f\n}\n"),
+        sequence,
+        altitude,
+        azimuth,
+        longitude,
+        latitude,
+        height);
+
+    const int byteCount = WideCharToMultiByte(
+        CP_UTF8, 0, document.GetString(), document.GetLength(), nullptr, 0, nullptr, nullptr);
+    if (byteCount <= 0)
+        return false;
+    std::vector<char> utf8(static_cast<size_t>(byteCount));
+    WideCharToMultiByte(CP_UTF8, 0, document.GetString(), document.GetLength(),
+                        utf8.data(), byteCount, nullptr, nullptr);
+
+    const CString temporaryPath = m_telescopeStatePath + _T(".tmp");
+    CFile file;
+    if (!file.Open(temporaryPath, CFile::modeCreate | CFile::modeWrite | CFile::shareDenyWrite))
+    {
+        AfxMessageBox(_T("Unable to write the telescope state file."));
+        return false;
+    }
+    file.Write(utf8.data(), static_cast<UINT>(utf8.size()));
+    file.Close();
+
+    for (int attempt = 0; attempt < 5; ++attempt)
+    {
+        if (MoveFileEx(temporaryPath, m_telescopeStatePath,
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        {
+            return true;
+        }
+        Sleep(20);
+    }
+    DeleteFile(temporaryPath);
+    AfxMessageBox(_T("Unable to publish the telescope state update."));
+    return false;
+}
+
+
+void Cstarmap2Dlg::OnBnClickedButtonStartDisplay()
+{
+    if (IsPythonRunning())
+    {
+        AfxMessageBox(_T("The Python star map is already running."));
         return;
     }
+
+    double altitude = 0.0;
+    double azimuth = 0.0;
+    double longitude = 0.0;
+    double latitude = 0.0;
+    double height = 0.0;
+    if (!ReadCurrentTelescopeInputs(altitude, azimuth, longitude, latitude, height))
+        return;
+    if (!WriteTelescopeState(altitude, azimuth, longitude, latitude, height))
+        return;
 
     if (!LaunchPythonStarMap(altitude, azimuth, longitude, latitude, height))
     {
@@ -386,7 +518,27 @@ void Cstarmap2Dlg::OnBnClickedButtonDisplay()
     }
 
     AfxMessageBox(
-        _T("Actual telescope and observatory coordinates sent to the Python sky map."));
+        _T("Python sky map started. Use Update Position for later coordinate changes."));
+}
+
+
+void Cstarmap2Dlg::OnBnClickedButtonUpdatePosition()
+{
+    if (!IsPythonRunning())
+    {
+        AfxMessageBox(_T("Start Display before sending a position update."));
+        return;
+    }
+
+    double altitude = 0.0;
+    double azimuth = 0.0;
+    double longitude = 0.0;
+    double latitude = 0.0;
+    double height = 0.0;
+    if (!ReadCurrentTelescopeInputs(altitude, azimuth, longitude, latitude, height))
+        return;
+
+    WriteTelescopeState(altitude, azimuth, longitude, latitude, height);
 }
 
 
@@ -405,23 +557,23 @@ void Cstarmap2Dlg::ReadGotoResult()
         document += line;
 
     double sequence = 0.0;
-    double altitude = 0.0;
-    double azimuth = 0.0;
+    double ra = 0.0;
+    double dec = 0.0;
     if (!FindJsonNumber(document, _T("sequence"), sequence) ||
-        !FindJsonNumber(document, _T("goto_altitude_deg"), altitude) ||
-        !FindJsonNumber(document, _T("goto_azimuth_deg"), azimuth) ||
+        !FindJsonNumber(document, _T("goto_ra_j2000_hours"), ra) ||
+        !FindJsonNumber(document, _T("goto_dec_j2000_deg"), dec) ||
         sequence < 0.0 || sequence != std::floor(sequence) ||
         sequence <= static_cast<double>(m_lastGotoSequence) ||
-        altitude < -90.0 || altitude > 90.0 || azimuth < 0.0 || azimuth >= 360.0)
+        ra < 0.0 || ra >= 24.0 || dec < -90.0 || dec > 90.0)
     {
         return;
     }
 
     m_lastGotoSequence = static_cast<ULONGLONG>(sequence);
     CString message;
-    message.Format(_T("Altitude: %+.4f deg"), altitude);
+    message.Format(_T("J2000 RA: %.4f h"), ra);
     SetDlgItemText(IDC_STATIC_GOTO_ALT, message);
-    message.Format(_T("Azimuth: %.4f deg"), azimuth);
+    message.Format(_T("J2000 DEC: %+.4f deg"), dec);
     SetDlgItemText(IDC_STATIC_GOTO_AZ, message);
 
     CString objectName;
@@ -436,7 +588,10 @@ void Cstarmap2Dlg::ReadGotoResult()
 void Cstarmap2Dlg::OnTimer(UINT_PTR nIDEvent)
 {
     if (nIDEvent == GOTO_POLL_TIMER_ID)
+    {
         ReadGotoResult();
+        IsPythonRunning();
+    }
     CDialogEx::OnTimer(nIDEvent);
 }
 
@@ -444,5 +599,10 @@ void Cstarmap2Dlg::OnTimer(UINT_PTR nIDEvent)
 void Cstarmap2Dlg::OnDestroy()
 {
     KillTimer(GOTO_POLL_TIMER_ID);
+    if (m_pythonProcess != nullptr)
+    {
+        CloseHandle(m_pythonProcess);
+        m_pythonProcess = nullptr;
+    }
     CDialogEx::OnDestroy();
 }

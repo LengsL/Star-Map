@@ -163,6 +163,30 @@ class FK6RendererCacheTest(unittest.TestCase):
             centre = (map_left + map_width // 2, 700 // 2 + 24)
             self.assertEqual(surface.get_at(centre)[:3], TELESCOPE)
 
+    def test_new_telescope_state_file_updates_existing_state_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state_file = Path(temporary_directory) / "telescope_state.json"
+            state = FK6SkyState(ROOT / "data" / "fk6_stars.bin", motion_epoch=self.start,
+                                telescope_state_file=state_file)
+            before_refreshes = state.coordinate_update_count
+            state_file.write_text(json.dumps({
+                "sequence": 1,
+                "altitude_deg": 23.5,
+                "azimuth_deg": 245.25,
+                "longitude_deg": 118.75,
+                "latitude_deg": 31.2,
+                "height_m": 42.0,
+            }), encoding="utf-8")
+
+            self.assertTrue(state.refresh_telescope_state())
+            self.assertEqual(state.actual_telescope_position, TelescopePosition(23.5, 245.25))
+            self.assertEqual(state.observatory.longitude_deg, 118.75)
+            self.assertEqual(state.observatory.latitude_deg, 31.2)
+            self.assertEqual(state.observatory.height_m, 42.0)
+            self.assertEqual(state.coordinate_update_count, before_refreshes + 1)
+            self.assertEqual(state.propagation_count, 1)
+            self.assertFalse(state.refresh_telescope_state())
+
     def test_hovered_object_uses_cached_screen_positions(self) -> None:
         pygame.font.init()
         font = pygame.font.Font(None, 18)
@@ -183,8 +207,8 @@ class FK6RendererCacheTest(unittest.TestCase):
                              if body.object_type == "moon").is_trackable)
         self.assertFalse(star.is_trackable)
 
-    def test_moon_click_goto_returns_target_without_moving_actual_telescope(self) -> None:
-        """Exercise the full renderer interaction and Python-to-MFC JSON contract."""
+    def test_moon_click_goto_keeps_target_local_without_writing_mfc_command(self) -> None:
+        """Solar-system GOTO must not use the fixed J2000 star protocol."""
         pygame.font.init()
         with tempfile.TemporaryDirectory() as temporary_directory:
             state = FK6SkyState(ROOT / "data" / "fk6_stars.bin", motion_epoch=self.start,
@@ -212,14 +236,30 @@ class FK6RendererCacheTest(unittest.TestCase):
             self.assertTrue(apply_event(
                 pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=state.target_goto_rect.center), state))
 
-            payload = json.loads(Path(state.goto_output).read_text(encoding="utf-8"))
-            self.assertEqual(payload["schema_version"], 1)
-            self.assertEqual(payload["command"], "goto")
-            self.assertEqual(payload["object_type"], "moon")
-            self.assertAlmostEqual(payload["goto_altitude_deg"], 90.0)
-            self.assertAlmostEqual(payload["goto_azimuth_deg"], 0.0)
+            self.assertFalse(Path(state.goto_output).exists())
             self.assertEqual(state.actual_telescope_position, TelescopePosition(12.0, 34.0))
             self.assertEqual(state.goto_target, TelescopePosition(90.0, 0.0))
+
+    def test_star_goto_returns_its_j2000_ra_dec(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state = FK6SkyState(ROOT / "data" / "fk6_stars.bin", motion_epoch=self.start,
+                                goto_output=Path(temporary_directory) / "goto.json")
+            star = state.object_for_star(0)
+            state.select_object(star)
+
+            self.assertTrue(state.goto_selected_object())
+            payload = json.loads(Path(state.goto_output).read_text(encoding="utf-8"))
+
+            self.assertEqual(payload["schema_version"], 1)
+            self.assertEqual(payload["command"], "goto")
+            self.assertEqual(payload["object_type"], "star")
+            self.assertAlmostEqual(
+                payload["goto_ra_j2000_hours"],
+                (math.degrees(float(state.ra_j2000_rad[0])) / 15.0) % 24.0)
+            self.assertAlmostEqual(
+                payload["goto_dec_j2000_deg"], math.degrees(float(state.dec_j2000_rad[0])))
+            self.assertNotIn("goto_altitude_deg", payload)
+            self.assertNotIn("goto_azimuth_deg", payload)
 
     def test_track_object_updates_the_goto_target_for_moon(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -238,17 +278,13 @@ class FK6RendererCacheTest(unittest.TestCase):
                                         (192, 204, 219), 6)
             state.solar_system = [moved_moon]
             state._refresh_tracked_target()
-            payload = json.loads(Path(state.goto_output).read_text(encoding="utf-8"))
-            self.assertEqual(payload["command"], "track")
-            self.assertTrue(payload["tracking"])
+            self.assertFalse(Path(state.goto_output).exists())
             assert state.goto_target is not None
             self.assertAlmostEqual(state.goto_target.altitude_deg, 21.0)
             self.assertAlmostEqual(state.goto_target.azimuth_deg, 31.0)
             state.select_object(moved_moon)
             self.assertTrue(state.toggle_tracking_selected_object())
-            payload = json.loads(Path(state.goto_output).read_text(encoding="utf-8"))
-            self.assertEqual(payload["command"], "stop_track")
-            self.assertFalse(payload["tracking"])
+            self.assertFalse(Path(state.goto_output).exists())
 
     def test_star_appearance_is_independent_of_magnitude_limit(self) -> None:
         before = star_appearance(4.5)

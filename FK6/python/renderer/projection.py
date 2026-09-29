@@ -229,6 +229,7 @@ class FK6SkyState:
     motion_epoch: datetime | None = None
     actual_telescope_position: TelescopePosition | None = None
     telescope_file: Path | None = None
+    telescope_state_file: Path | None = None
     goto_output: Path | None = None
 
     def set_actual_telescope_position(self, altitude_deg: float, azimuth_deg: float) -> None:
@@ -247,6 +248,8 @@ class FK6SkyState:
         self.latitude_rad = math.radians(self.observatory.latitude_deg)
         self.longitude_rad = math.radians(self.observatory.longitude_deg)
         finite_magnitudes = self.stars["vmag"][np.isfinite(self.stars["vmag"])]
+
+
         if not len(finite_magnitudes):
             raise ValueError("FK6 catalogue contains no finite Vmag values")
         self.catalog_mag_min = math.floor(float(finite_magnitudes.min()))
@@ -295,13 +298,55 @@ class FK6SkyState:
         self.target_goto_rect: pygame.Rect | None = None
         self.target_track_rect: pygame.Rect | None = None
         self.moon_phase = MoonPhaseInfo(0.0, True)
+        self.telescope_state_sequence = -1
+
+        #update the telescope position from the telescope
         if self.telescope_file is not None and Path(self.telescope_file).exists():
             data=json.loads(Path(self.telescope_file).read_text(encoding="utf-8"))
             self.set_actual_telescope_position(float(data["alt_deg"]), float(data["az_deg"]))
         self.update_altaz(self.motion_epoch)
+        self.refresh_telescope_state()
 
     def _clamp_magnitude(self, value: float) -> float:
         return max(float(self.catalog_mag_min), min(float(self.catalog_mag_max), float(value)))
+
+    def refresh_telescope_state(self) -> bool:
+        """Apply a newer MFC telescope-state file without recreating the sky state."""
+        if self.telescope_state_file is None:
+            return False
+        try:
+            payload = json.loads(Path(self.telescope_state_file).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            # MFC replaces the file atomically; tolerate a transient file race
+            # or a missing state file until its next polling interval.
+            return False
+
+        sequence = payload.get("sequence")
+        if (not isinstance(sequence, int) or isinstance(sequence, bool)
+                or sequence <= self.telescope_state_sequence):
+            return False
+        try:
+            altitude = float(payload["altitude_deg"])
+            azimuth = float(payload["azimuth_deg"])
+            observatory = ObservatoryLocation(
+                longitude_deg=float(payload["longitude_deg"]),
+                latitude_deg=float(payload["latitude_deg"]),
+                height_m=float(payload["height_m"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not -90.0 <= altitude <= 90.0 or not 0.0 <= azimuth < 360.0:
+            return False
+
+        # Validate the whole payload before mutating state. This keeps a bad
+        # update from changing only the physical telescope or only the site.
+        self.actual_telescope_position = TelescopePosition(altitude, azimuth)
+        self.observatory = observatory
+        self.latitude_rad = math.radians(observatory.latitude_deg)
+        self.longitude_rad = math.radians(observatory.longitude_deg)
+        self.telescope_state_sequence = sequence
+        self.update_altaz(self.observation_time)
+        return True
 
     def update_altaz(self, moment: datetime) -> None:
         """Refresh current RA/Dec, then derive live local Alt/Az."""
@@ -466,9 +511,19 @@ class FK6SkyState:
         self.projection_dirty = True
 
     def _write_goto_command(self, selected: SelectedObject, command: str) -> None:
-        """Atomically publish a Python-to-host command, so readers never see partial JSON."""
-        if self.goto_output is None or self.goto_target is None:
+        """Publish J2000 coordinates only for catalogue stars.
+
+        Solar-system bodies need body-specific control instead of a fixed J2000
+        target, so they retain their in-map target/track behaviour without
+        emitting the generic MFC GOTO command.
+        """
+        if (self.goto_output is None or self.goto_target is None or
+                selected.object_type != "star" or selected.star_index is None or
+                not 0 <= selected.star_index < len(self.ra_j2000_rad)):
             return
+
+        ra_j2000_rad = float(self.ra_j2000_rad[selected.star_index])
+        dec_j2000_rad = float(self.dec_j2000_rad[selected.star_index])
         output = Path(self.goto_output)
         output.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -478,8 +533,10 @@ class FK6SkyState:
             "object_type": selected.object_type,
             "object_id": selected.identifier,
             "object_name": selected.display_name,
-            "goto_altitude_deg": self.goto_target.altitude_deg,
-            "goto_azimuth_deg": self.goto_target.azimuth_deg,
+
+            "goto_ra_j2000_hours": (math.degrees(ra_j2000_rad) / 15.0) % 24.0,
+            "goto_dec_j2000_deg": math.degrees(dec_j2000_rad),
+
             "tracking": self.tracked_object_key == selected.key,
         }
         temporary = output.with_suffix(output.suffix + ".tmp")
@@ -503,6 +560,7 @@ class FK6SkyState:
             return False
         self._set_goto_target(self.selected_object, "goto")
         return True
+
 
     def toggle_tracking_selected_object(self) -> bool:
         """Start/stop live GOTO target updates for a Moon or planet."""
@@ -909,6 +967,7 @@ def render_frame(state: FK6SkyState, width: int, height: int,
     draw_constellation_labels(surface, state, font, centre, radius, labels)
     draw_object_layers(surface, state, font, centre, radius, labels)
     draw_moon_layer(surface, state, font, centre, radius, labels)
+
     if state.goto_target is not None:
         x, y = project_altaz(math.radians(state.goto_target.altitude_deg),
                              math.radians(state.goto_target.azimuth_deg), centre, radius,
@@ -1018,6 +1077,7 @@ def run(state: FK6SkyState, width: int, height: int, fixed_time: datetime | None
     clock = pygame.time.Clock()
     cached_surface: pygame.Surface | None = None
     next_coordinate_refresh = time.monotonic() + 1.0
+    next_telescope_state_refresh = 0.0
     running = True
     while running:
         for event in pygame.event.get():
@@ -1030,6 +1090,10 @@ def run(state: FK6SkyState, width: int, height: int, fixed_time: datetime | None
                 
             running = apply_event(event, state) and running
         now = time.monotonic()
+        if now >= next_telescope_state_refresh:
+            state.refresh_telescope_state()
+
+            next_telescope_state_refresh = now + 0.1
         if fixed_time is None and now >= next_coordinate_refresh:
             state.update_altaz(datetime.now(timezone.utc))
             next_coordinate_refresh = now + 1.0
@@ -1049,6 +1113,7 @@ def run_star_map(
     magnitude_limit: float | None = None, fixed_time: datetime | None = None,
     export: Path | None = None,
     goto_output: Path | None = None,
+    telescope_state_file: Path | None = None,
 ) -> None:
     catalog = ROOT / "data" / "fk6_stars.bin"
 
@@ -1058,6 +1123,7 @@ def run_star_map(
         magnitude_limit=magnitude_limit,
         motion_epoch=fixed_time or datetime.now(timezone.utc),
         goto_output=goto_output,
+        telescope_state_file=telescope_state_file,
     )
 
     if altitude_deg is not None and azimuth_deg is not None:
